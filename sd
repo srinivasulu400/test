@@ -1,0 +1,101 @@
+import org.apache.spark.sql._
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.functions._
+import scala.collection.immutable
+import org.apache.spark.sql.expressions.UserDefinedFunction
+import scala.io.Source
+
+addNullEmbedFields("budget", "_tmp_budget",   Array("cap", "invoice", from_budget")).
+  withColumn("budget", struct("_tmp_budget.*")).
+
+  "budget": {"from_budget": "false", "cap": null,"invoice": null}
+
+  budget struct<
+  cap: int,
+  invoice: boolean,
+  from_budget: boolean
+  >,
+
+val dFHandle = new DfHandler
+import dFHandle._
+
+import spark.implicits._
+val order_json_path = "s3://test.json"
+
+val v_df = spark.read.json(order_json__path)
+
+println(s"\n videos : ${v_df.count}")
+if (v_df.count > 0) {
+  val a_df = v_df.addNullFields(Seq("id", "n_id", "languages", "c_metadata")).
+    addNullEmbedFields("languages", "languages", Array("language")).
+    withColumn("language", concat_ws(" ", col("languages.language"))).
+    drop("languages").
+
+    // withColumn("c_metadata", struct(col("_c_metadata") as "c_metadata")).
+    addNullEmbedFields("c_metadata.key_value", "_c_metadata", Array("key","value")).
+    withColumn("c_metadata", struct(col("_c_metadata") as "key_value")).
+
+    //  withColumn("c_metadata", struct(to_json(col("_c_metadata")).alias("key_value"))).
+
+    select("id", "n_id", "c_metadata", "language"). withColumn("loaded_at", lit(current_timestamp))
+
+  a_df.printSchema
+
+  a_df.write.mode(SaveMode.Overwrite).insertInto("load.order")
+
+}
+{"id": "245", "n_id": "1901", "c_metadata": {"key_value": [{"key": " date", "value": "2019-10-31T23:12:50Z"}, {"key": "apt type", "value": "video"}, {"key": "sri", "value": "sri: 123"}, {"key": "p date", "value": "21:00:00 PDT 2019"}, {"key": "pu date", "value": "2019-10-31"}]}, "languages": null}
+<languages>
+  <language>en</language>
+</languages>
+
+CREATE EXTERNAL TABLE `load.order`(
+  `id` bigint,
+  `network_id` string,
+  `customized_metadata` array<struct<key_value:struct<key:string,value:string>>>,`language` string,`loaded_at` timestamp)
+stored as parquet
+LOCATION 's3://'
+
+import scala.util.Try
+import org.apache.spark.sql._
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.functions._
+
+class DfHandler{
+  def hasColumn( dF: DataFrame, path: String) : Boolean = Try(dF(path)).isSuccess
+  // function to rename the field names of a dataframe using the names provided in an array, (apply schema on data)
+  implicit class DataFrameImprovements(dF: DataFrame) {
+
+    def addNullEmbedFields(outer_field: String, temp_field: String, column_names: Array[String]): DataFrame = {
+      var  df = dF.addNullFields(Seq(temp_field))
+      val loc = df.schema.fieldIndex(temp_field)
+      for (column <- column_names) {
+        if (!hasColumn(df, f"$outer_field.$column")){
+          df.schema.apply(loc).dataType match {
+            case st: StructType => df = df.withColumn("_tmp", struct(lit(null).cast(StringType).alias(column))).
+              withColumn(temp_field, struct(f"_tmp.$column" , temp_field+".*")).drop("_tmp")
+            case _ =>              df = df.withColumn(temp_field, struct(lit(null).cast(StringType).alias(column)))
+          }
+        } else {
+          df.schema.apply(loc).dataType match {
+            case st: StructType => df = df.withColumn(temp_field, struct(temp_field+".*", f"$outer_field.$column"))
+            case _ =>              df = df.withColumn(temp_field, struct(f"$outer_field.$column"))
+          }
+        }
+      }
+      df
+    }
+    def addNullFields(column_seq :Seq[String]): DataFrame = {
+      val df_with_nulls = column_seq.foldLeft(dF) {
+        case (df, col) => {
+          var df_ = df
+          if (!hasColumn(df,col))
+            df_ =df.withColumn(col, lit(null).cast(StringType))
+          df_
+        }
+      }
+      df_with_nulls
+    }
+  }
+
+}
